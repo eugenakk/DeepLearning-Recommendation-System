@@ -164,3 +164,140 @@ data_df, cate_sizes = cate2int(data_df)
 # 범주형 데이터가 다음과 같이 index로 변경되었습니다.
 data_df.loc[:, cate_cols].sample(5, random_state=1)
 
+
+################### FACTORIZATION MAchine의 아이디어
+# 다중선형회귀 (mULTIPLE LINEAR REGRESSION)부분
+row = data_df.loc[
+    (data_df.user_id==195) 
+    & (data_df.item_id==172), :]
+row
+
+
+############## LINEAR REGRESSION PART
+from tensorflow.keras.layers import Layer
+
+class LinearModel(Layer):
+    """
+    Linear Logit
+    y = w0 + x1 + x2 + ...
+    """
+    def build(self, input_shape):
+        self.b = self.add_weight(shape=(1,),
+                                 initializer='zeros',
+                                 trainable=True)
+        super().build(input_shape)    
+    
+    def call(self, inputs, **kwargs):
+        logits = tf.reduce_sum(inputs, axis=0)
+        return logits
+
+
+########################## FACTORIZATION MACHINE PART
+from itertools import combinations
+
+class FactorizationMachine(Layer):
+    """
+    Factorization Machine Layer
+    """
+    def call(self, inputs, **kwargs):
+        logits = 0.
+        for v_i, v_j in combinations(inputs, 2):
+            logits += tf.tensordot(v_i, v_j, axes(1, 1))
+        return logits
+
+class FactorizationMachine(Layer):
+    """
+    Factorization Machine Layer
+    """
+    def call(self, inputs, **kwargs):
+        # List of (# Batch, # Embed) -> (# Batch, # Features ,# Embed)
+        inputs = tf.stack(inputs, axis=1) 
+
+        logits = tf.reduce_sum(tf.square(tf.reduce_sum(inputs, axis=1)) - tf.reduce_sum(tf.square(inputs), axis=1), axis=1) /2
+        
+        return logits[: , None] # (# batch, 1)의 꼴이 되어야 함
+
+
+######################## 임베딩 레이어와 커스텀 레이어로 FM구현
+from tensorflow.keras.layers import Input
+from tensorflow.keras.layers import Embedding
+from tensorflow.keras.models import Model
+
+fm_size = 8
+col_names = ["user_id", "item_id", "age", "year"]
+
+inputs = []
+fm_embeds = []
+linear_embeds = []
+
+# Embedding Part : 모든 칼럼에 대해 임베딩을 해줍니다. 
+for col_name in col_names:
+    input_category_dim = cate_sizes[col_name]        
+    x = Input(shape=(), name=col_name)
+    
+    lr_out = Embedding(input_category_dim, 1)(x)
+    fm_out = Embedding(input_category_dim, fm_size)(x)
+    
+    inputs.append(x)
+    linear_embeds.append(lr_out)
+    fm_embeds.append(fm_out)
+
+
+# LR Model Part
+lr_logits = LinearModel(name='lr')(linear_embeds)
+
+# FM model part
+fm_logits = FactorizationMachine(name='fm')(fm_embeds)
+
+# LR 파트와 FM파트를 합쳐서 최종 모델을 만들어줍니다. 
+pred = lr_logits + fm_logits
+model = Model(inputs, pred, name='movielens')
+
+####### MOVIE LENS 데이터를 이용해 FM 모델 만들기
+data_df.loc[:, ["user_id", "item_id", "age", "year", "rating"]].sample(5)
+
+X = data_df.loc[:, ["user_id", "item_id", "age", "year"]] 
+y = data_df[['rating']]
+
+from sklearn.model_selection import train_test_split
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, 
+                                                    test_size=0.1,
+                                                    random_state=12345)
+
+
+
+trainset = tf.data.Dataset.from_tensor_slices(
+    ({k : v.values.astype(np.int32) 
+      for k, v in X_train.iteritems()}, 
+     y_train.values))
+
+validset = tf.data.Dataset.from_tensor_slices(
+    ({k : v.values.astype(np.int32) 
+      for k, v in X_test.iteritems()}, 
+     y_test.values))
+
+
+
+# 텐서로 바꿔주기
+trainset = tf.data.Dataset.from_tensor_slices(
+    ({k : v.values.astype(np.int32) 
+      for k, v in X_train.iteritems()}, 
+     y_train.values))
+
+validset = tf.data.Dataset.from_tensor_slices(
+    ({k : v.values.astype(np.int32) 
+      for k, v in X_test.iteritems()}, 
+     y_test.values))
+
+####### 모델에 학습
+batch_size = 256 
+num_epoch = 50
+
+hist = model.fit_generator(
+    (trainset
+     .shuffle(batch_size*10)
+     .batch(batch_size)),
+    epochs=num_epoch,
+    validation_data=validset.batch(batch_size*4))
+
